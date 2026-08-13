@@ -1,0 +1,199 @@
+---
+# =============================================================================
+# quarkus-perf — Kind cluster deployment for Causa RCA demo
+#
+# Deploys quarkus-perf into the causa-rca namespace with:
+#   - CHAOS_MEMORY_CACHE_ENABLED=true   → unbounded heap leak causes OOMKilled
+#   - CHAOS_HTTP_LARGE_RESPONSE_ENABLED=true + CHAOS_HTTP_IDLE_TIMEOUT_ENABLED=true
+#     → amplifies per-connection heap cost for load-gen traffic
+#   - 1 replica (single-node kind cluster)
+#   - H2 in-memory DB (no external postgres needed)
+#   - OTEL export disabled (no collector in kind)
+#   - JFR + SYS_PTRACE for async-profiler compatibility (when available)
+#   - JMX port 9091 exposed for Quarkus MCP Server (when available)
+#
+# OOM pressure builds as the load-gen job hits /api/bookings and
+# /api/accounts/:id/transactions — the leak cache grows without bound.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quarkus-perf-config
+  labels:
+    app: quarkus-perf
+data:
+  THREAD_POOL_CORE: "10"
+  THREAD_POOL_MAX: "50"
+
+  DB_MAX_POOL_SIZE: "10"
+
+  # ── Chaos: heap leak via unbounded static cache ──────────────────────────
+  # Each transaction caches CHAOS_MEMORY_OBJECTS_PER_TX × 64KB objects.
+  # With CONCURRENT_USERS=20 at 100ms/req this fills 512Mi in ~3-5 minutes.
+  CHAOS_MEMORY_CACHE_ENABLED: "true"
+  CHAOS_MEMORY_OBJECTS_PER_TX: "3"
+
+  # ── Chaos: large HTTP responses amplify connection-level heap ────────────
+  CHAOS_HTTP_LARGE_RESPONSE_ENABLED: "true"
+  CHAOS_HTTP_LARGE_RESPONSE_KB: "128"
+  CHAOS_HTTP_IDLE_TIMEOUT_ENABLED: "true"
+  CHAOS_HTTP_IDLE_TIMEOUT_S: "30"
+
+  # DB chaos off — keep it simple for this demo
+  CHAOS_DB_LEAK_ENABLED: "false"
+  CHAOS_DB_SLOW_QUERY_MS: "0"
+
+  # Disable OTEL export — no collector in kind
+  OTEL_SDK_DISABLED: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quarkus-perf
+  labels:
+    app: quarkus-perf
+    version: "1.0.0"
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: "/q/metrics"
+    prometheus.io/port: "8080"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: quarkus-perf
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: quarkus-perf
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/q/metrics"
+        prometheus.io/port: "8080"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 185
+        fsGroup: 185
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: quarkus-perf
+          image: quay.io/causa-ai-hub/quarkus-perf:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: jmx
+              containerPort: 9091
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: quarkus-perf-config
+          env:
+            - name: JAVA_OPTS_APPEND
+              value: >-
+                -XX:+UseContainerSupport
+                -XX:MaxRAMPercentage=75.0
+                -XX:+HeapDumpOnOutOfMemoryError
+                -XX:HeapDumpPath=/dumps/heapdump.hprof
+                -XX:+FlightRecorder
+                -XX:StartFlightRecording=settings=profile,dumponexit=true,filename=/tmp/jfr/recording.jfr
+                -Xlog:gc*:file=/dumps/gc.log:time,uptime,level,tags:filecount=4,filesize=20m
+                -Dfile.encoding=UTF-8
+                -Dcom.sun.management.jmxremote
+                -Dcom.sun.management.jmxremote.port=9091
+                -Dcom.sun.management.jmxremote.rmi.port=9091
+                -Dcom.sun.management.jmxremote.authenticate=false
+                -Dcom.sun.management.jmxremote.ssl=false
+                -Djava.rmi.server.hostname=localhost
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          startupProbe:
+            httpGet:
+              path: /q/health/started
+              port: 8080
+            failureThreshold: 12
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - SYS_PTRACE
+          volumeMounts:
+            - name: dumps
+              mountPath: /dumps
+            - name: logs
+              mountPath: /logs
+            - name: jfr-data
+              mountPath: /tmp/jfr
+      volumes:
+        - name: dumps
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: jfr-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quarkus-perf-svc
+  labels:
+    app: quarkus-perf
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: "/q/metrics"
+    prometheus.io/port: "8080"
+spec:
+  selector:
+    app: quarkus-perf
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: jmx
+      port: 9091
+      targetPort: 9091
+      protocol: TCP
+  type: ClusterIP

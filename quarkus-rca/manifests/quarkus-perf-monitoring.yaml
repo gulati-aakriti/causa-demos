@@ -1,0 +1,81 @@
+---
+# =============================================================================
+# ServiceMonitor — scrapes quarkus-perf /q/metrics via Prometheus Operator
+# The "release: prometheus" label must match the kube-prometheus-stack's
+# serviceMonitorSelector (default label used by the installer's Helm values).
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: quarkus-perf
+  labels:
+    app: quarkus-perf
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: quarkus-perf
+  endpoints:
+    - port: http
+      path: /q/metrics
+      interval: 15s
+      scrapeTimeout: 10s
+---
+# =============================================================================
+# PrometheusRule — heap/leak/connection alerts that trigger Causa RCA
+# Alertmanager routes these to POST /api/v1/alerts on causa-backend.
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: quarkus-perf-alerts
+  labels:
+    app: quarkus-perf
+    release: prometheus
+spec:
+  groups:
+    - name: quarkus-perf.chaos
+      rules:
+        - alert: QuarkusPerfHighHeapUsage
+          expr: quarkus_perf_heap_used_ratio > 0.85
+          for: 1m
+          labels:
+            severity: warning
+            namespace: causa-rca
+            workload_name: quarkus-perf
+          annotations:
+            summary: "quarkus-perf heap usage > 85%"
+            description: "Pod {{ $labels.pod }} heap ratio {{ $value | humanizePercentage }}"
+
+        - alert: QuarkusPerfHeapCritical
+          expr: quarkus_perf_heap_used_ratio > 0.90
+          for: 30s
+          labels:
+            severity: critical
+            namespace: causa-rca
+            workload_name: quarkus-perf
+          annotations:
+            summary: "quarkus-perf heap usage > 90% — OOMKill imminent"
+            description: "Pod {{ $labels.pod }} heap ratio {{ $value | humanizePercentage }}"
+
+        - alert: QuarkusPerfOOMKilled
+          expr: kube_pod_container_status_last_terminated_reason{reason="OOMKilled", container="quarkus-perf"} == 1
+          for: 0m
+          labels:
+            severity: critical
+            namespace: causa-rca
+            workload_name: quarkus-perf
+          annotations:
+            summary: "quarkus-perf container OOMKilled"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} was OOMKilled"
+
+        - alert: QuarkusPerfLeakCacheGrowing
+          expr: rate(quarkus_perf_leak_cache_entries[2m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+            namespace: causa-rca
+            workload_name: quarkus-perf
+          annotations:
+            summary: "quarkus-perf memory leak cache is growing"
+            description: "{{ $value | humanize }} entries/s added to leak cache"

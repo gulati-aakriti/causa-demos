@@ -1,0 +1,70 @@
+---
+# =============================================================================
+# quarkus-perf Load Generator Job
+#
+# Continuously hits /api/bookings and /api/accounts/:id/transactions on
+# quarkus-perf-svc to drive the heap leak chaos scenario.
+#
+# With CHAOS_MEMORY_CACHE_ENABLED=true and CHAOS_MEMORY_OBJECTS_PER_TX=3
+# the heap fills within a few minutes at 20 concurrent users.
+# ttlSecondsAfterFinished=0 means the Job pod is cleaned up immediately on
+# completion — for an ongoing load the DURATION_SECONDS is intentionally long.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quarkus-perf-load-gen
+  labels:
+    app: quarkus-perf-load-gen
+spec:
+  backoffLimit: 5
+  # Keep the job pod around for 30 minutes after it finishes so logs are readable
+  ttlSecondsAfterFinished: 1800
+  template:
+    metadata:
+      labels:
+        app: quarkus-perf-load-gen
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 185
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: load-gen
+          image: quay.io/causa-ai-hub/quarkus-perf:1.0.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - "java"
+            - "-cp"
+            - "/deployments/quarkus-run.jar:/deployments/lib/main/*:/deployments/app/*"
+            - "ai.causa.quarkusperf.load.LoadGenerator"
+          env:
+            # Target the quarkus-perf ClusterIP service in the same namespace
+            - name: TARGET_HOST
+              value: "quarkus-perf-svc"
+            - name: TARGET_PORT
+              value: "8080"
+            # 20 concurrent workers — enough load to exhaust the heap cache quickly
+            - name: CONCURRENT_USERS
+              value: "20"
+            # Run for 30 minutes — should trigger multiple OOMKilled events
+            - name: DURATION_SECONDS
+              value: "1800"
+            - name: REQUEST_DELAY_MS
+              value: "100"
+            - name: BOOKING_RATIO
+              value: "50"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL

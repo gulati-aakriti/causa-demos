@@ -1,0 +1,111 @@
+# Sample Quarkus application deployment for the Causa RCA demo.
+#
+# This is the perf-impact workload from causaai/chaos-lab.
+# The reference manifest (perf-impact-deploy.yaml) is the upstream copy; this
+# file adds JFR flags, SYS_PTRACE, and JMX settings needed by the RCA stack.
+#
+# Key settings required by the Causa RCA stack:
+#   - JFR flags in JAVA_TOOL_OPTIONS: -XX:+FlightRecorder -XX:StartFlightRecording=...
+#   - SYS_PTRACE capability so async-profiler can attach
+#   - JMX port 9091 exposed (used by the Quarkus MCP server)
+#   - 650Mi memory limit, Xmx378m — OOMKilled occurs naturally during STRESS phase
+#
+# perf-impact endpoints:
+#   GET /work    — simulates a request (lightweight CPU task)
+#   GET /status  — shows current GC scenario and phase (BASELINE|RAMP|STRESS|RECOVERY)
+#
+# OOM pressure is automatic — the PROMOTION_PRESSURE scenario retains 85% of
+# allocated objects during STRESS phase, filling the heap and causing OOMKilled.
+# No manual trigger needed. Cycle: BASELINE(60s)→RAMP(60s)→STRESS(60s)→RECOVERY(60s)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-cache
+  labels:
+    app: auth-cache
+  annotations:
+    cryostat.io/inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-cache
+  template:
+    metadata:
+      labels:
+        app: auth-cache
+    spec:
+      containers:
+        - name: auth-cache
+          image: "quay.io/causa-ai-hub/quarkus-gc-pause:promotion-pressure-nd"
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "650Mi"
+              cpu: "100m"
+            limits:
+              memory: "650Mi"
+          env:
+            - name: GC_SCENARIO
+              value: "PROMOTION_PRESSURE"
+            - name: JAVA_TOOL_OPTIONS
+              value: >-
+                -XX:+UseContainerSupport
+                -Xms256m
+                -Xmx378m
+                -XX:+FlightRecorder
+                -XX:StartFlightRecording=settings=profile,dumponexit=true,filename=/tmp/jfr/recording.jfr
+                -Xlog:gc
+                -Dcom.sun.management.jmxremote
+                -Dcom.sun.management.jmxremote.port=9091
+                -Dcom.sun.management.jmxremote.rmi.port=9091
+                -Dcom.sun.management.jmxremote.authenticate=false
+                -Dcom.sun.management.jmxremote.ssl=false
+                -Djava.rmi.server.hostname=localhost
+          securityContext:
+            capabilities:
+              add:
+                - SYS_PTRACE
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: jmx
+              containerPort: 9091
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: jfr-data
+              mountPath: /tmp/jfr
+      volumes:
+        - name: jfr-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-cache
+  labels:
+    app: auth-cache
+spec:
+  selector:
+    app: auth-cache
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: jmx
+      protocol: TCP
+      port: 9091
+      targetPort: 9091
+  type: ClusterIP

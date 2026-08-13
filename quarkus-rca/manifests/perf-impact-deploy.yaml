@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-cache
+  labels:
+    app: auth-cache
+  annotations:
+    cryostat.io/inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-cache
+  template:
+    metadata:
+      labels:
+        app: auth-cache
+    spec:
+      containers:
+        - name: auth-cache
+          image: "quay.io/causa-ai-hub/quarkus-gc-pause:promotion-pressure-nd"
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              memory: "650Mi"
+            limits:
+              memory: "650Mi"
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:+UseContainerSupport -Xms256m -Xmx378m -Xlog:gc -Dcom.sun.management.jmxremote -Dcom.sun.management.jmxremote.port=9091 -Dcom.sun.management.jmxremote.rmi.port=9091 -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Djava.rmi.server.hostname=localhost"
+            - name: GC_SCENARIO
+              value: "PROMOTION_PRESSURE"
+          ports:
+            - containerPort: 8080
+            - containerPort: 9091
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-cache-service
+  labels:
+    app: auth-cache
+spec:
+  selector:
+    app: auth-cache
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

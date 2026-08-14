@@ -56,7 +56,7 @@ An end-to-end demo that deploys a **quarkus-perf** workload engineered to OOMKil
 
 **What the demo does:**
 
-- Provisions a Kind cluster and deploys the full Causa RCA stack via the [Quarkus RCA installer](https://github.com/gulati-aakriti/installer) _(personal fork, work in progress — the installer URL can be overridden via `--installer-url` if an official repo is available)_
+- Provisions a Kind cluster and deploys the full Causa RCA stack via the [Quarkus RCA installer](https://github.com/causaai/installer) (`mvp_demo` branch)
 - Deploys **quarkus-perf** with chaos flags enabled (`CHAOS_MEMORY_CACHE_ENABLED=true`) — the workload leaks 192 KB of heap per transaction with no eviction, resulting in the workload being OOM-killed in approximately 3–5 minutes under load
 - Pushes LLM credentials (Vertex AI / Claude) and alert cooldown to Causa Backend
 - Registers the Causa MCP server in `~/.bob/settings/mcp.json` and installs the `causa-rca` skill into Bob IDE

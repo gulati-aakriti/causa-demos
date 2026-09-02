@@ -69,8 +69,14 @@ source "$UTILS_FILE"
 source "$UNINSTALL_FILE"
 source "$LLM_FILE"
 
-_demo_exit_trap() { trap '' INT TERM; stop_spinner; exit 130; }
-trap '_demo_exit_trap' INT TERM
+_demo_exit_trap() {
+    trap '' INT TERM EXIT
+    stop_spinner
+    if [[ -f "${PORTFORWARD_PID_FILE:-}" ]]; then
+        stop_port_forwards "$PORTFORWARD_PID_FILE" 2>/dev/null || true
+    fi
+}
+trap '_demo_exit_trap' INT TERM EXIT
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -106,9 +112,15 @@ INSTALLER_NAME="installer"
 INSTALLER_URL="${INSTALLER_URL:-https://github.com/causaai/installer}"
 INSTALLER_BRANCH="${INSTALLER_BRANCH:-mvp_demo}"
 
-# Causa MCP Server is on NodePort 30005 (see installer manifests/causa_mcp/deployment.yaml)
-CAUSA_MCP_URL="http://localhost:30005"
-CAUSA_BACKEND_URL="http://localhost:30001"
+# Local ports used for kubectl port-forward tunnels started after install.
+CAUSA_MCP_LOCAL_PORT="${CAUSA_MCP_LOCAL_PORT:-30005}"
+CAUSA_BACKEND_LOCAL_PORT="${CAUSA_BACKEND_LOCAL_PORT:-30001}"
+CAUSA_MCP_URL="http://localhost:${CAUSA_MCP_LOCAL_PORT}"
+CAUSA_BACKEND_URL="http://localhost:${CAUSA_BACKEND_LOCAL_PORT}"
+
+# File that records the PIDs of background port-forward processes so the
+# terminate path can kill them cleanly.
+PORTFORWARD_PID_FILE="${SCRIPT_DIR}/artifacts/.portforward.pids"
 
 # ---------------------------------------------------------------------------
 # Usage
@@ -522,9 +534,28 @@ fi
 create_llm_secrets "$LLM_ENV_FILE" "$NAMESPACE"
 
 # ===========================================================================
-# Step 1.5: Clone chaos-lab and locate quarkus-perf manifests
+# Step 1.5: Start port-forward tunnels for causa-backend and causa-mcp
 # ===========================================================================
-log_section "Step 1.5: Cloning chaos-lab to get quarkus-perf manifests"
+# kind target only — on OpenShift the services are cluster-hosted and
+# reachable via Route; on other targets (vm, etc.) the connectivity model
+# is different and tunnels must be set up externally.
+# ===========================================================================
+if [[ "$TARGET" == "kind" ]]; then
+    log_section "Step 1.5: Starting port-forward tunnels"
+    if ! start_port_forwards \
+            "$NAMESPACE" \
+            "$CAUSA_BACKEND_LOCAL_PORT" \
+            "$CAUSA_MCP_LOCAL_PORT" \
+            "$PORTFORWARD_PID_FILE"; then
+        cleanup
+        exit 1
+    fi
+fi
+
+# ===========================================================================
+# Step 1.6: Clone chaos-lab and locate quarkus-perf manifests
+# ===========================================================================
+log_section "Step 1.6: Cloning chaos-lab to get quarkus-perf manifests"
 
 start_spinner "Cloning chaos-lab (branch: $CHAOS_LAB_BRANCH)..."
 if ! clone_repo "$CHAOS_LAB_URL" "$CHAOS_LAB_DIR" "$CHAOS_LAB_BRANCH" \
@@ -999,7 +1030,7 @@ _POD_DISPLAY="${_QP_POD:-quarkus-perf-<generated-suffix>}"
     echo -e "${COLOR_CYAN}Note:${COLOR_RESET} You can prompt immediately — no need to wait for an OOMKill."
     echo -e "  Watch pod restarts: ${COLOR_BOLD}kubectl get pods -n ${NAMESPACE} -w${COLOR_RESET}"
     echo ""
-    if [[ "$TARGET" != "openshift" ]]; then
+    if [[ "$TARGET" == "kind" ]]; then
         echo -e "${COLOR_CYAN}Causa Backend:${COLOR_RESET} ${CAUSA_BACKEND_URL}/api/v1/diagnostics"
         echo -e "${COLOR_CYAN}Causa MCP:${COLOR_RESET}     ${CAUSA_MCP_URL}/mcp"
         if [[ "$_IS_BOB_SKILL_PATH" == "true" ]]; then
